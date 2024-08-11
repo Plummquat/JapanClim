@@ -1,4 +1,7 @@
-# Welcome to the Japanese Climate Repository
+# Japanese Climate Change Indicators
   
-This website was inspired by a desire to create a centralized hub for displaying climate change trends in Japan. 
- 
+Welcome! The purpose of this page is to act as a hub for displaying data regarding climate change indicators from the Japanese Meteorological Agency. All of the data displayed here comes from the Japanese Meteorological Agency and this page nor its authors are associated with this organization. For all official information regarding weather and climate in Japan, please visit the [JMA website](https://www.jma.go.jp/jma/indexe.html). 
+
+# Nationwide 
+
+# Prefecture Level 
