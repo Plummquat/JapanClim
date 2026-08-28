@@ -1,0 +1,166 @@
+---
+title: "ENSO Weather Trends"
+output:
+  html_document:
+    df_print: paged
+---
+
+[Visit my main page](https://plummquat.github.io/IanPlummer/)
+
+*Disclaimer: All of the data displayed here comes from the Japanese Meteorological Agency and this page nor its authors are associated with this organization. For all official information regarding weather and climate in Japan, please visit the [JMA website](https://www.jma.go.jp/jma/indexe.html).*
+
+Brief note about the data and figures:
+
+The underlying code scrapes the data from the [JMA monthly climatology tables](https://www.data.jma.go.jp/stats/etrn/view/monthly_s3_en.php?block_no=47401&view=1). While this data includes flags for inhomogeneity caused by changes in instrumentation, observation methods and/or site location; the code does not account for these and uses all available data. 
+
+The code uses the ERSST based ONI index to determine the phase and strength of the ENSO event. From there, it computes the JFM averages of each variable for each ENSO year and bins them by their respective phase and strength. 
+
+The figure output and mapping is automated, meaning that some of the snowfall figures present gibberish. This is caused by a small sample of underlying data. For example, the Irozaki station plots with only 2 valid months of snowfall data in its whole record. *Please use the snowfall maps with caution as they are most impacted by sample size and data inhomogenity*
+
+```{r, include=FALSE, message=FALSE}
+library(tidyverse)
+library(leaflet)
+library(jmastats)   # install.packages("jmastats") if you don't have it yet
+library(sf)
+library(xfun)       # for base64_uri() -- already installed alongside rmarkdown/knitr
+```
+
+```{r config, include=FALSE}
+# ---- CONFIG: adjust these two paths if needed ----
+
+# The same combined_long.csv used by enso_boxplots.py. We only need it
+# here to get the list of (block_no, station) pairs -- it already has
+# everything needed to look up coordinates and to match image filenames.
+combined_csv <- "/Users/ip367316/Downloads/jma_output/combined_long.csv"
+
+# Folder holding the PNGs produced by enso_boxplots.py. This folder
+# needs to be published alongside this .Rmd's output (e.g. committed
+# into the same GitHub Pages repo) or the popup images won't load once
+# the page is live.
+image_dir <- "/Users/ip367316/Downloads/enso_plots"
+
+# Popup sizing. popup_img_width is the <img> tag's pixel width;
+# popup_max_width should be a bit larger than that (Leaflet pads/frames
+# the popup, and if popup_max_width is smaller than the image it'll
+# get clipped with a scrollbar instead of just displaying full-size).
+popup_img_width <- 600
+popup_max_width <- 6500
+```
+
+```{r load-and-build, include=FALSE, message=FALSE, warning=FALSE}
+combined <- read_csv(combined_csv, show_col_types = FALSE) %>%
+  distinct(block_no, station) %>%
+  mutate(block_no_chr = as.character(block_no))
+
+# jmastats::stations is an sf object bundled with the package -- no
+# download needed. It includes block_no, address/area, and a POINT
+# geometry column we can pull lon/lat out of.
+jma_stations <- jmastats::stations %>%
+  mutate(block_no_chr = as.character(block_no)) %>%
+  st_transform(4326)
+
+coords <- st_coordinates(jma_stations)
+jma_stations <- jma_stations %>%
+  mutate(lon = coords[, "X"], lat = coords[, "Y"]) %>%
+  st_drop_geometry()
+
+jpd <- combined %>%
+  left_join(
+    jma_stations %>% select(block_no_chr, lon, lat, area, address, station_type),
+    by = "block_no_chr"
+  )
+
+# ---- Diagnostic: how many stations actually got coordinates? ----
+n_total <- nrow(jpd)
+n_matched <- sum(!is.na(jpd$lat))
+message(sprintf("Matched %d of %d stations to jmastats coordinates.", n_matched, n_total))
+if (n_matched < n_total) {
+  message("Unmatched block_no values (check these -- format mismatch is the usual cause):")
+  print(jpd %>% filter(is.na(lat)) %>% distinct(block_no, station))
+}
+
+jpd <- jpd %>% filter(!is.na(lat), !is.na(lon))
+
+# Build the filename for each variable's plot, matching enso_boxplots.py's
+# naming convention: {block_no}_{station_name_with_underscores}_{suffix}.png
+make_img_path <- function(block_no, station_name, suffix) {
+  fname <- paste0(block_no, "_", str_replace_all(station_name, " ", "_"), "_", suffix, ".png")
+  file.path(image_dir, fname)
+}
+
+make_popup <- function(block_no, station_name, suffix, label) {
+  img_path <- make_img_path(block_no, station_name, suffix)
+  if (file.exists(img_path)) {
+    # Embed the image directly as base64 data -- no relative-path
+    # dependency, so it works the same in RStudio's Viewer, a real
+    # browser, and once published to GitHub Pages.
+    img_uri <- xfun::base64_uri(img_path)
+    paste0('<b>', station_name, '</b><br><img src="', img_uri, '" style="width:',
+           popup_img_width, 'px; max-width:none;">')
+  } else {
+    paste0('<b>', station_name, '</b><br>No ', label, ' plot available for this station')
+  }
+}
+
+jpd <- jpd %>%
+  rowwise() %>%
+  mutate(
+    temp_popup     = make_popup(block_no, station, "temp",     "temperature"),
+    precip_popup   = make_popup(block_no, station, "precip",   "precipitation"),
+    snowfall_popup = make_popup(block_no, station, "snowfall", "snowfall")
+  ) %>%
+  ungroup()
+
+# Hard check: fail here with a clear message rather than inside leaflet
+# later with a cryptic "object not found" error. If you're running
+# chunks one at a time, this is your reminder to run this chunk before
+# any of the three map chunks below.
+required_cols <- c("lon", "lat", "station", "temp_popup", "precip_popup", "snowfall_popup")
+missing_cols <- setdiff(required_cols, names(jpd))
+if (length(missing_cols) > 0) {
+  stop("jpd is missing columns: ", paste(missing_cols, collapse = ", "),
+       ". Re-run this chunk (load-and-build) before running any of the map chunks.")
+}
+```
+
+## Temperature
+
+```{r temp-map, echo=FALSE, message=FALSE, warning=FALSE}
+jpd %>%
+  leaflet(width = 1000) %>%
+ addProviderTiles(providers$Esri.WorldImagery, group = "World Imagery") %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+addLayersControl(baseGroups = c("OSM", "World Imagery")) %>%
+  addMarkers(lng = ~lon, lat = ~lat,
+             label = ~station,
+             popup = ~temp_popup,
+             popupOptions = popupOptions(maxWidth = popup_max_width))
+```
+
+## Precipitation
+
+```{r precip-map, echo=FALSE, message=FALSE, warning=FALSE}
+jpd %>%
+  leaflet(width = 1000) %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "World Imagery") %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+addLayersControl(baseGroups = c("OSM", "World Imagery")) %>%
+  addMarkers(lng = ~lon, lat = ~lat,
+             label = ~station,
+             popup = ~precip_popup,
+             popupOptions = popupOptions(maxWidth = popup_max_width))
+```
+
+## Snowfall
+
+```{r snowfall-map, echo=FALSE, message=FALSE, warning=FALSE}
+jpd %>%
+  leaflet(width = 1000) %>%
+ addProviderTiles(providers$Esri.WorldImagery, group = "World Imagery") %>%
+  addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+addLayersControl(baseGroups = c("OSM", "World Imagery")) %>%
+  addMarkers(lng = ~lon, lat = ~lat,
+             label = ~station,
+             popup = ~snowfall_popup,
+             popupOptions = popupOptions(maxWidth = popup_max_width))
+```
